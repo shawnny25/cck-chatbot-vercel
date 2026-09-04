@@ -1,0 +1,7 @@
+{
+  "name": "2027cck-chatbot",
+  "private": true,
+  "dependencies": {
+    "@vercel/blob": "*"
+  }
+}

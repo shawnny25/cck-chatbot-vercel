@@ -6,7 +6,7 @@
 // LOG_EXPORT_KEY 라는 이름으로 본인이 정한 비밀번호(영문+숫자 조합 추천)를 등록해야 한다.
 // (chat.js의 GEMINI_API_KEY 등록했던 것과 같은 화면, 같은 방법)
 
-const { list } = require('@vercel/blob');
+const { list, get } = require('@vercel/blob');
 
 function escapeHtml(s) {
   return String(s)
@@ -43,12 +43,15 @@ module.exports = async function handler(req, res) {
   let rows = [];
   try {
     // ponytail: list()는 최대 1000개까지만 한 번에 가져옴 — 로그가 그 이상 쌓이면 페이지네이션(cursor) 추가 필요.
+    // 스토어가 Private라 blob.url을 그냥 fetch()하면 접근 불가 — get(pathname, {access:'private'})로 읽어야 함.
     const { blobs } = await list({ prefix: 'chat-logs/' });
     const fetched = await Promise.all(
       blobs.map(async (b) => {
         try {
-          const r = await fetch(b.url);
-          return await r.json();
+          const result = await get(b.pathname, { access: 'private' });
+          if (!result || result.statusCode !== 200) return null;
+          const text = await new Response(result.stream).text();
+          return JSON.parse(text);
         } catch (e) {
           return null;
         }

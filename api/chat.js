@@ -10,8 +10,7 @@ const { put } = require('@vercel/blob');
 async function logInteraction(message, answer, isError) {
   try {
     const key = `chat-logs/q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
-    // ponytail: access:'public'으로 저장 — 개인정보 없는 익명 로그이고 경로가 랜덤이라 URL을 모르면 접근 불가.
-    // 완전 비공개가 필요해지면 @vercel/blob의 private 액세스 옵션으로 교체.
+    // 스토어가 Private로 생성되어 있으므로 반드시 access:'private'로 써야 함(public으로 쓰면 에러남).
     await put(
       key,
       JSON.stringify({
@@ -20,7 +19,7 @@ async function logInteraction(message, answer, isError) {
         answer: answer || '',
         error: !!isError,
       }),
-      { access: 'public', addRandomSuffix: false, contentType: 'application/json' }
+      { access: 'private', addRandomSuffix: false, contentType: 'application/json' }
     );
   } catch (e) {
     console.error('interaction log failed:', e && e.message);

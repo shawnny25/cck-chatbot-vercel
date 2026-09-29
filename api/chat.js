@@ -26,7 +26,10 @@ async function logInteraction(message, answer, isError) {
   }
 }
 
-const GEMINI_MODEL = 'gemini-3.1-flash-lite'; // 가볍고 빠른 모델 — 혼잡(고수요) 오류가 상대적으로 적음.
+const GEMINI_MODEL = 'gemini-3.1-flash-lite'; // 기본 모델 — 가볍고 빠름.
+// 기본 모델이 혼잡(503/429 "high demand")하면 순서대로 시도할 예비 모델.
+// 모델마다 서버 용량이 따로라서, 한 모델이 혼잡해도 다른 모델은 정상인 경우가 많다.
+const FALLBACK_MODELS = ['gemini-3.5-flash-lite', 'gemini-2.5-flash'];
 
 const SYSTEM_PROMPT = `
 너는 사회복지공동모금회 해외지원사업(2027년 기준 사업명: 국제 나눔파트너십 지원사업 — 예전 명칭 "사랑의열매 해외지원사업"과 동일 계열의 사업, KCOC 파트너십지원부)의 신규 공모 안내를 담당하는 상담 챗봇이다.
@@ -214,9 +217,13 @@ module.exports = async function handler(req, res) {
 
   const contents = [...trimmedHistory, { role: 'user', parts: [{ text: message }] }];
 
-  const callGemini = async () => {
+  // 2.5 계열은 thinkingBudget, 3.x 계열은 thinkingLevel 파라미터를 쓴다.
+  const thinkingFor = (model) =>
+    model.startsWith('gemini-2.') ? { thinkingBudget: 0 } : { thinkingLevel: 'minimal' };
+
+  const callGemini = async (model) => {
     const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       {
         method: 'POST',
         headers: {
@@ -229,38 +236,48 @@ module.exports = async function handler(req, res) {
           generationConfig: {
             temperature: 0.3,
             maxOutputTokens: 2048,
-            thinkingConfig: { thinkingLevel: 'minimal' },
+            thinkingConfig: thinkingFor(model),
           },
         }),
       }
     );
-    const data = await resp.json();
-    return { ok: resp.ok, status: resp.status, data };
+    const data = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, status: resp.status, data, model };
   };
 
-  // 구글 서버 혼잡(고수요/503류) 오류는 자주 일시적이므로, 최대 2번까지 짧은 대기 후 재시도한다.
+  // 혼잡(고수요/503류) 오류 판별
   const isOverloaded = (r) => {
     if (r.ok) return false;
     const msg = ((r.data && r.data.error && r.data.error.message) || '').toLowerCase();
-    return r.status === 503 || r.status === 429 || msg.includes('overloaded') || msg.includes('high demand');
+    return r.status === 503 || r.status === 429 || r.status === 500 ||
+      msg.includes('overloaded') || msg.includes('high demand');
   };
+  // 예비 모델 이름이 폐기·변경된 경우(404)에도 다음 모델로 넘어간다.
+  const shouldTryNext = (r) => isOverloaded(r) || r.status === 404;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   try {
-    let result = await callGemini();
-    let attempt = 1;
-    while (isOverloaded(result) && attempt < 3) {
-      await sleep(600 * attempt);
-      result = await callGemini();
-      attempt += 1;
+    // 1) 기본 모델 1회 + 1초 뒤 1회 재시도  2) 그래도 혼잡하면 예비 모델로 전환
+    let result = await callGemini(GEMINI_MODEL);
+    if (isOverloaded(result)) {
+      await sleep(1000);
+      result = await callGemini(GEMINI_MODEL);
+    }
+    for (const fb of FALLBACK_MODELS) {
+      if (!shouldTryNext(result)) break;
+      result = await callGemini(fb);
     }
 
     if (!result.ok) {
-      const msg =
+      const rawMsg =
         (result.data && result.data.error && result.data.error.message) ||
         'Gemini API 호출 중 오류가 발생했습니다.';
-      await logInteraction(message, msg, true);
-      res.status(result.status).json({ error: msg });
+      // 로그에는 원문 오류를 남기고, 이용자에게는 한국어 안내문을 보여준다.
+      await logInteraction(message, `[${result.model}] ${rawMsg}`, true);
+      const userMsg = isOverloaded(result)
+        ? '현재 이용자가 많아 답변이 지연되고 있습니다. 잠시 후(1~2분 뒤) 다시 질문해 주세요.'
+        : '일시적인 오류로 답변을 드리지 못했습니다. 잠시 후 다시 시도해 주세요.';
+      res.status(result.status).json({ error: userMsg });
       return;
     }
 
